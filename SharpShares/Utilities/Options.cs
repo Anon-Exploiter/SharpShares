@@ -22,6 +22,7 @@ namespace SharpShares.Utilities
             public string ldap = null;
             public string ou = null;
             public string outfile = null;
+            public string csv = "output.csv";
             public string targets = null;
         }
         public static Dictionary<string, string[]> ParseArgs(string[] args)
@@ -74,6 +75,10 @@ namespace SharpShares.Utilities
             if (parsedArgs.ContainsKey("/outfile"))
             {
                 arguments.outfile = parsedArgs["/outfile"][0];
+            }
+            if (parsedArgs.ContainsKey("/csv"))
+            {
+                arguments.csv = parsedArgs["/csv"][0];
             }
             if (parsedArgs.ContainsKey("/stealth"))
             {
@@ -154,10 +159,24 @@ namespace SharpShares.Utilities
                     Console.WriteLine($"[!] {arguments.outfile} already esists. Appending to file");
                 }
             }
+            Console.WriteLine($"\tcsv: {arguments.csv}");
+            if (!String.IsNullOrEmpty(arguments.csv))
+            {
+                try
+                {
+                    SharpShares.Enums.Shares.InitializeCsv(arguments.csv);
+                    Console.WriteLine($"[+] CSV report: {arguments.csv}");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine("[!] CSV Error: {0}", ex.Message);
+                    success = false;
+                }
+            }
             if (arguments.filter != null) { Console.WriteLine("[*] Excluding {0} shares", String.Join(",", arguments.filter)); }
             if (arguments.verbose) { Console.WriteLine("[*] Including unreadable shares"); }
             Console.WriteLine("[*] Starting share enumeration with thread limit of {0}", arguments.threads.ToString());
-            Console.WriteLine("[r] = Readable Share\n[w] = Writeable Share\n[-] = Unauthorized Share (requires /verbose flag)\n[?] = Unchecked Share (requires /stealth flag)\n");
+            Console.WriteLine("[r] = Readable Share\n[w] = Confirmed Writeable Share\n[-] = Unauthorized Share (requires /verbose flag)\n[?] = Unchecked Share (requires /stealth flag)\n");
             
             return success;
         }
@@ -169,7 +188,7 @@ namespace SharpShares.Utilities
 ▄█ █▀█ █▀█ █▀▄ █▀▀ ▄█ █▀█ █▀█ █▀▄ ██▄ ▄█
 
 Usage:
-    SharpShares.exe /threads:50 /ldap:servers /ou:""OU=Special Servers,DC=example,DC=local"" /filter:SYSVOL,NETLOGON,IPC$,PRINT$ /verbose /outfile:C:\path\to\file.txt
+    SharpShares.exe /threads:50 /ldap:servers /ou:""OU=Special Servers,DC=example,DC=local"" /filter:SYSVOL,NETLOGON,IPC$,PRINT$ /verbose /outfile:C:\path\to\file.txt /csv:C:\path\to\output.csv
 
 Optional Arguments:
     /threads  - specify maximum number of parallel threads  (default=25)
@@ -187,6 +206,7 @@ Optional Arguments:
     /filter   - list of comma-separated shares to exclude from enumeration
                 default: SYSVOL,NETLOGON,IPC$,PRINT$
     /outfile  - specify file for shares to be appended to instead of printing to std out 
+    /csv      - write detailed capability results to CSV (default: output.csv)
     /verbose  - return unauthorized shares
 ";
             Console.WriteLine(usageString);

@@ -1,19 +1,20 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Principal;
-using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-
 
 namespace SharpShares.Enums
 {
     class Shares
     {
+        private const string CsvHeader = "TimestampUtc,Computer,Share,Path,Status,Readable,Writeable,CanListRoot,CanReadAcl,CanCreateFile,CanWriteFile,CanDeleteFile,CanCreateDirectory,CanDeleteDirectory,MatchingAllowRights,MatchingDenyRights,ReadError,AclError,FileWriteError,DirectoryWriteError,Notes";
+
         [DllImport("Netapi32.dll", SetLastError = true)]
         public static extern int NetWkstaGetInfo(string servername, int level, out IntPtr bufptr);
 
@@ -53,16 +54,43 @@ namespace SharpShares.Enums
             public string shi1_netname;
             public uint shi1_type;
             public string shi1_remark;
+
             public SHARE_INFO_1(string sharename, uint sharetype, string remark)
             {
                 this.shi1_netname = sharename;
                 this.shi1_type = sharetype;
                 this.shi1_remark = remark;
             }
+
             public override string ToString()
             {
                 return shi1_netname;
             }
+        }
+
+        private class ShareReport
+        {
+            public string TimestampUtc = DateTime.UtcNow.ToString("o");
+            public string Computer;
+            public string Share;
+            public string Path;
+            public string Status = "Unknown";
+            public bool Readable;
+            public bool Writeable;
+            public bool CanListRoot;
+            public bool CanReadAcl;
+            public bool CanCreateFile;
+            public bool CanWriteFile;
+            public bool CanDeleteFile;
+            public bool CanCreateDirectory;
+            public bool CanDeleteDirectory;
+            public string MatchingAllowRights = string.Empty;
+            public string MatchingDenyRights = string.Empty;
+            public string ReadError = string.Empty;
+            public string AclError = string.Empty;
+            public string FileWriteError = string.Empty;
+            public string DirectoryWriteError = string.Empty;
+            public string Notes = string.Empty;
         }
 
         const uint MAX_PREFERRED_LENGTH = 0xFFFFFFFF;
@@ -108,173 +136,325 @@ namespace SharpShares.Enums
                 NetApiBufferFree(bufPtr);
                 return ShareInfos.ToArray();
             }
-            else
+
+            ShareInfos.Add(new SHARE_INFO_1("ERROR=" + ret.ToString(), 10, string.Empty));
+            return ShareInfos.ToArray();
+        }
+
+        public static void GetComputerShares(string computer, Utilities.Options.Arguments arguments)
+        {
+            string[] errors = { "ERROR=53", "ERROR=5" };
+            SHARE_INFO_1[] computerShares = EnumNetShares(computer);
+
+            if (computerShares.Length > 0)
             {
-                ShareInfos.Add(new SHARE_INFO_1("ERROR=" + ret.ToString(), 10, string.Empty));
-                return ShareInfos.ToArray();
+                WindowsIdentity identity = WindowsIdentity.GetCurrent();
+
+                foreach (SHARE_INFO_1 share in computerShares)
+                {
+                    if ((arguments.filter != null) && (arguments.filter.Contains(share.shi1_netname.ToString().ToUpper())))
+                    {
+                        continue;
+                    }
+
+                    string path = String.Format("\\\\{0}\\{1}", computer, share.shi1_netname);
+                    ShareReport report = new ShareReport
+                    {
+                        Computer = computer,
+                        Share = share.shi1_netname,
+                        Path = path
+                    };
+
+                    if (errors.Contains(share.shi1_netname))
+                    {
+                        report.Status = "EnumError";
+                        report.Notes = share.shi1_netname;
+                        WriteCsvReport(report, arguments.csv);
+                        continue;
+                    }
+
+                    if (arguments.stealth)
+                    {
+                        WriteShareOutput(String.Format("[?] \\\\{0}\\{1}", computer, share.shi1_netname), arguments.outfile);
+                        report.Status = "Unchecked";
+                        report.Notes = "Stealth mode enabled; access checks skipped.";
+                        WriteCsvReport(report, arguments.csv);
+                        continue;
+                    }
+
+                    CheckShareAccess(report, identity);
+                    WriteCsvReport(report, arguments.csv);
+
+                    if (report.Readable)
+                    {
+                        WriteShareOutput(String.Format("[r] \\\\{0}\\{1}", computer, share.shi1_netname), arguments.outfile);
+                    }
+
+                    if (report.Writeable)
+                    {
+                        WriteShareOutput(String.Format("[w] \\\\{0}\\{1}", computer, share.shi1_netname), arguments.outfile);
+                    }
+
+                    if (arguments.verbose && !report.Readable && !report.Writeable)
+                    {
+                        WriteShareOutput(String.Format("[-] \\\\{0}\\{1}", computer, share.shi1_netname), arguments.outfile);
+                    }
+                }
+            }
+
+            Utilities.Status.currentCount += 1;
+        }
+
+        private static void CheckShareAccess(ShareReport report, WindowsIdentity identity)
+        {
+            try
+            {
+                Directory.GetFileSystemEntries(report.Path);
+                report.CanListRoot = true;
+                report.Readable = true;
+                report.Status = "Readable";
+            }
+            catch (Exception ex)
+            {
+                report.ReadError = ex.Message;
+                report.Status = "Unauthorized";
+            }
+
+            ReadAclDetails(report, identity);
+            ProbeFileWrite(report);
+            ProbeDirectoryWrite(report);
+
+            if (report.CanCreateFile && report.CanWriteFile)
+            {
+                report.Writeable = true;
+                report.Status = "Writeable";
             }
         }
 
-        public static void GetComputerShares(string computer, Utilities.Options.Arguments argumetns)
+        private static void ReadAclDetails(ShareReport report, WindowsIdentity identity)
         {
-            //Error 53 - network path was not found
-            //Error 5 - Access Denied
-            string[] errors = { "ERROR=53", "ERROR=5" };
-            SHARE_INFO_1[] computerShares = EnumNetShares(computer);
-            if (computerShares.Length > 0)
+            try
             {
-                List<string> readableShares = new List<string>();
-                List<string> writeableShares = new List<string>();
-                List<string> unauthorizedShares = new List<string>();
-                // get current user's identity to compare against ACL of shares
-                WindowsIdentity identity = WindowsIdentity.GetCurrent();
-                string userSID = identity.User.Value;
-                foreach (SHARE_INFO_1 share in computerShares)// <------------ go to next share -----------+
-                {                                                                                       // |
-                    if ((argumetns.filter != null) && (argumetns.filter.Contains(share.shi1_netname.ToString().ToUpper())))  // |
-                    {                                                                                   // |
-                        continue; // Skip the remainder of this iteration. --------------------------------+
-                    }
-                    //share.shi1_netname returns the error code when caught
-                    if (argumetns.stealth && !errors.Contains(share.shi1_netname))
+                AuthorizationRuleCollection rules = Directory.GetAccessControl(report.Path).GetAccessRules(true, true, typeof(SecurityIdentifier));
+                List<string> allowRights = new List<string>();
+                List<string> denyRights = new List<string>();
+
+                foreach (FileSystemAccessRule rule in rules)
+                {
+                    if (!IdentityMatches(rule.IdentityReference, identity))
                     {
-                        Console.WriteLine("[?] \\\\{0}\\{1}", computer, share.shi1_netname);
-                        continue; //do not perform access checks
+                        continue;
                     }
-                    try
+
+                    string entry = String.Format("{0}:{1}", rule.IdentityReference, rule.FileSystemRights);
+                    if (rule.AccessControlType == AccessControlType.Allow)
                     {
-                        string path = String.Format("\\\\{0}\\{1}", computer, share.shi1_netname);
-                        var files = Directory.GetFiles(path);
-                        readableShares.Add(share.shi1_netname);
-                        AuthorizationRuleCollection rules = Directory.GetAccessControl(path).GetAccessRules(true, true, typeof(System.Security.Principal.SecurityIdentifier));
-                        foreach (FileSystemAccessRule rule in rules)
-                        {
-                            //https://stackoverflow.com/questions/130617/how-do-you-check-for-permissions-to-write-to-a-directory-or-file
-                            // compare SID of group referenced in ACL to groups the current user is a member of
-                            if (rule.IdentityReference.ToString() == userSID || identity.Groups.Contains(rule.IdentityReference))
-                            {
-                                // plenty of other FileSystem Rights to look for
-                                // https://docs.microsoft.com/en-us/dotnet/api/system.security.accesscontrol.filesystemrights
-                                if ((//rule.FileSystemRights.HasFlag(FileSystemRights.CreateFiles) ||
-                                     //rule.FileSystemRights.HasFlag(FileSystemRights.WriteAttributes) ||
-                                     //rule.FileSystemRights.HasFlag(FileSystemRights.WriteData) ||
-                                     //rule.FileSystemRights.HasFlag(FileSystemRights.WriteExtendedAttributes) ||
-                                     //rule.FileSystemRights.HasFlag(FileSystemRights.CreateDirectories) ||
-                                    rule.FileSystemRights.HasFlag(FileSystemRights.Write)) && rule.AccessControlType == AccessControlType.Allow)
-                                {
-                                    writeableShares.Add(share.shi1_netname);
-                                    break;
-                                }
-                            }
-                        }
+                        allowRights.Add(entry);
                     }
-                    catch
+                    else if (rule.AccessControlType == AccessControlType.Deny)
                     {
-                        //share.shi1_netname returns the error code when caught
-                        if (!errors.Contains(share.shi1_netname))
-                        {
-                            unauthorizedShares.Add(share.shi1_netname);
-                        }
+                        denyRights.Add(entry);
                     }
                 }
-                if (readableShares.Count > 0)
+
+                report.CanReadAcl = true;
+                report.MatchingAllowRights = String.Join(" | ", allowRights.ToArray());
+                report.MatchingDenyRights = String.Join(" | ", denyRights.ToArray());
+            }
+            catch (Exception ex)
+            {
+                report.AclError = ex.Message;
+            }
+        }
+
+        private static bool IdentityMatches(IdentityReference ruleIdentity, WindowsIdentity identity)
+        {
+            if (identity.User != null && ruleIdentity == identity.User)
+            {
+                return true;
+            }
+
+            return identity.Groups != null && identity.Groups.Contains(ruleIdentity);
+        }
+
+        private static void ProbeFileWrite(ShareReport report)
+        {
+            string filePath = Path.Combine(report.Path, ".SharpShares-" + Guid.NewGuid().ToString("N") + ".tmp");
+
+            try
+            {
+                using (FileStream stream = new FileStream(filePath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
                 {
-                    foreach (string share in readableShares)
-                    {
-                        string output = String.Format("[r] \\\\{0}\\{1}", computer, share);
-                        if (!String.IsNullOrEmpty(argumetns.outfile))
-                        {
-                            try
-                            {
-                                WriteToFileThreadSafe(output, argumetns.outfile);
-                            }
-                            catch (Exception ex)
-                            {
-                                Console.WriteLine("[!] Outfile Error: {0}", ex.Message);
-                                //Environment.Exit(0);
-                            }
-                        }
-                        else
-                        {
-                            Console.WriteLine(output);
-                        }
-                    }
-                }
-                if (writeableShares.Count > 0)
-                {
-                    foreach (string share in writeableShares)
-                    {
-                        string output = String.Format("[w] \\\\{0}\\{1}", computer, share);
-                        if (!String.IsNullOrEmpty(argumetns.outfile))
-                        {
-                            try
-                            {
-                                WriteToFileThreadSafe(output, argumetns.outfile);
-                            }
-                            catch (Exception ex)
-                            {
-                                Console.WriteLine("[!] Outfile Error: {0}", ex.Message);
-                                //Environment.Exit(0);
-                            }
-                        }
-                        else
-                        {
-                            Console.WriteLine(output);
-                        }
-                    }
-                }
-                if (argumetns.verbose && unauthorizedShares.Count > 0)
-                {
-                    foreach (string share in unauthorizedShares)
-                    {
-                        string output = String.Format("[-] \\\\{0}\\{1}", computer, share);
-                        if (!String.IsNullOrEmpty(argumetns.outfile))
-                        {
-                            try
-                            {
-                                WriteToFileThreadSafe(output, argumetns.outfile);
-                            }
-                            catch (Exception ex)
-                            {
-                                Console.WriteLine("[!] Outfile Error: {0}", ex.Message);
-                                //Environment.Exit(0);
-                            }
-                        }
-                        else
-                        {
-                            Console.WriteLine(output);
-                        }
-                    }
+                    report.CanCreateFile = true;
+                    byte[] bytes = Encoding.ASCII.GetBytes("SharpShares write probe");
+                    stream.Write(bytes, 0, bytes.Length);
+                    report.CanWriteFile = true;
                 }
             }
-            Utilities.Status.currentCount += 1;
+            catch (Exception ex)
+            {
+                report.FileWriteError = ex.Message;
+            }
+
+            if (report.CanCreateFile)
+            {
+                try
+                {
+                    File.Delete(filePath);
+                    report.CanDeleteFile = true;
+                }
+                catch (Exception ex)
+                {
+                    AppendNote(report, "File cleanup failed: " + ex.Message);
+                }
+            }
         }
-        
+
+        private static void ProbeDirectoryWrite(ShareReport report)
+        {
+            string directoryPath = Path.Combine(report.Path, ".SharpShares-" + Guid.NewGuid().ToString("N"));
+
+            try
+            {
+                Directory.CreateDirectory(directoryPath);
+                report.CanCreateDirectory = true;
+            }
+            catch (Exception ex)
+            {
+                report.DirectoryWriteError = ex.Message;
+            }
+
+            if (report.CanCreateDirectory)
+            {
+                try
+                {
+                    Directory.Delete(directoryPath);
+                    report.CanDeleteDirectory = true;
+                }
+                catch (Exception ex)
+                {
+                    AppendNote(report, "Directory cleanup failed: " + ex.Message);
+                }
+            }
+        }
+
+        private static void AppendNote(ShareReport report, string note)
+        {
+            if (String.IsNullOrEmpty(report.Notes))
+            {
+                report.Notes = note;
+            }
+            else
+            {
+                report.Notes += " " + note;
+            }
+        }
+
+        private static void WriteShareOutput(string output, string outfile)
+        {
+            if (!String.IsNullOrEmpty(outfile))
+            {
+                try
+                {
+                    WriteToFileThreadSafe(output, outfile);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine("[!] Outfile Error: {0}", ex.Message);
+                }
+            }
+            else
+            {
+                Console.WriteLine(output);
+            }
+        }
+
+        public static void InitializeCsv(string path)
+        {
+            if (String.IsNullOrEmpty(path))
+            {
+                return;
+            }
+
+            using (StreamWriter sw = File.CreateText(path))
+            {
+                sw.WriteLine(CsvHeader);
+            }
+        }
+
+        private static void WriteCsvReport(ShareReport report, string path)
+        {
+            if (String.IsNullOrEmpty(path))
+            {
+                return;
+            }
+
+            WriteToFileThreadSafe(ToCsv(report), path);
+        }
+
+        private static string ToCsv(ShareReport report)
+        {
+            string[] values =
+            {
+                report.TimestampUtc,
+                report.Computer,
+                report.Share,
+                report.Path,
+                report.Status,
+                report.Readable.ToString(),
+                report.Writeable.ToString(),
+                report.CanListRoot.ToString(),
+                report.CanReadAcl.ToString(),
+                report.CanCreateFile.ToString(),
+                report.CanWriteFile.ToString(),
+                report.CanDeleteFile.ToString(),
+                report.CanCreateDirectory.ToString(),
+                report.CanDeleteDirectory.ToString(),
+                report.MatchingAllowRights,
+                report.MatchingDenyRights,
+                report.ReadError,
+                report.AclError,
+                report.FileWriteError,
+                report.DirectoryWriteError,
+                report.Notes
+            };
+
+            return String.Join(",", values.Select(EscapeCsv).ToArray());
+        }
+
+        private static string EscapeCsv(string value)
+        {
+            if (value == null)
+            {
+                return string.Empty;
+            }
+
+            bool mustQuote = value.Contains(",") || value.Contains("\"") || value.Contains("\r") || value.Contains("\n");
+            value = value.Replace("\"", "\"\"");
+            return mustQuote ? "\"" + value + "\"" : value;
+        }
+
         public static ReaderWriterLockSlim _readWriteLock = new ReaderWriterLockSlim();
 
         public static void WriteToFileThreadSafe(string text, string path)
         {
-            // Set Status to Locked
             _readWriteLock.EnterWriteLock();
             try
             {
-                // Append text to the file
                 using (StreamWriter sw = File.AppendText(path))
                 {
                     sw.WriteLine(text);
-                    sw.Close();
                 }
             }
             finally
             {
-                // Release lock
                 _readWriteLock.ExitWriteLock();
             }
         }
+
         public static void GetAllShares(List<string> computers, Utilities.Options.Arguments arguments)
         {
             Console.WriteLine("[+] Starting share enumeration against {0} hosts\n", computers.Count);
-            //https://blog.danskingdom.com/limit-the-number-of-c-tasks-that-run-in-parallel/
             var threadList = new List<Action>();
             foreach (string computer in computers)
             {
@@ -284,6 +464,5 @@ namespace SharpShares.Enums
             Parallel.Invoke(options, threadList.ToArray());
             Console.WriteLine("[+] Finished Enumerating Shares");
         }
-
     }
 }

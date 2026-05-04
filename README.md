@@ -46,7 +46,7 @@ execute-assembly /path/to/SharpShares.exe /ldap:all /filter:sysvol,netlogon,ipc$
 [*] Excluding SYSVOL,NETLOGON,IPC$,PRINT$ shares
 [*] Starting share enumeration with thread limit of 25
 [r] = Readable Share
-[w] = Writeable Share
+[w] = Confirmed Writeable Share
 [-] = Unauthorized Share (requires /verbose flag)
 [?] = Unchecked Share (requires /stealth flag)
 
@@ -65,6 +65,11 @@ execute-assembly /path/to/SharpShares.exe /ldap:all /filter:sysvol,netlogon,ipc$
 [r] \\DESKTOP\C$
 [+] Finished Enumerating Shares
 ```
+
+By default, SharpShares also writes a detailed capability report to `output.csv`. Use `/csv:C:\path\to\output.csv` to choose a different path. The CSV records the access checks performed per share, including whether the share root could be listed, whether ACLs could be read, whether a temporary file could be created/written/deleted, whether a temporary directory could be created/deleted, and any error messages.
+
+`[w]` is only printed when SharpShares successfully creates and writes a temporary file in the share root. ACL entries are still included in the CSV for context, but they are no longer used by themselves to mark a share writable.
+
 ### Specifying Targets
 
 The `/ldap` and `/ou` flags can be used together or seprately to generate a list of hosts to enumerate.
