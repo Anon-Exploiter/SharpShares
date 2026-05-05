@@ -153,7 +153,7 @@ namespace SharpShares.Utilities
                     }
                 }
                 //localhost returns false positives
-                ComputerNames.RemoveAll(u => u.Contains(System.Environment.MachineName.ToUpper()));
+                ComputerNames.RemoveAll(SharpShares.Enums.Shares.IsLocalComputer);
                 Console.WriteLine("[+] LDAP Search Results: {0}", ComputerNames.Count.ToString());
                 
 
@@ -221,6 +221,8 @@ namespace SharpShares.Utilities
                     }
 
                 }
+                //localhost returns false positives
+                ComputerNames.RemoveAll(SharpShares.Enums.Shares.IsLocalComputer);
                 Console.WriteLine("[+] OU Search Results: {0}", ComputerNames.Count().ToString());
                 mySearcher.Dispose();
                 entry.Dispose();

@@ -31,7 +31,7 @@ namespace SharpShares
                             hosts = hosts.Concat(ou).ToList();
                     }
                     //remove duplicate hosts
-                    hosts = hosts.Distinct().ToList();
+                    hosts = hosts.Distinct().Where(h => !Enums.Shares.IsLocalComputer(h)).ToList();
                     Utilities.Status.totalCount = hosts.Count;
                     Utilities.Status.StartOutputTimer();
                     Enums.Shares.GetAllShares(hosts, arguments);

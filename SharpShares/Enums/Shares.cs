@@ -14,6 +14,9 @@ namespace SharpShares.Enums
     class Shares
     {
         private const string CsvHeader = "TimestampUtc,Computer,Share,Path,Status,Readable,Writeable,CanListRoot,CanReadAcl,CanCreateFile,CanWriteFile,CanDeleteFile,CanCreateDirectory,CanDeleteDirectory,MatchingAllowRights,MatchingDenyRights,ReadError,AclError,FileWriteError,DirectoryWriteError,Notes";
+        private const int FileWriteRetryCount = 5;
+        private const int FileWriteRetryDelayMilliseconds = 200;
+        private static bool _csvWriteErrorReported = false;
 
         [DllImport("Netapi32.dll", SetLastError = true)]
         public static extern int NetWkstaGetInfo(string servername, int level, out IntPtr bufptr);
@@ -141,8 +144,37 @@ namespace SharpShares.Enums
             return ShareInfos.ToArray();
         }
 
+        public static bool IsLocalComputer(string computer)
+        {
+            if (String.IsNullOrWhiteSpace(computer))
+            {
+                return true;
+            }
+
+            string normalized = computer.Trim().Trim('\\').TrimEnd('.').ToUpperInvariant();
+            int slashIndex = normalized.IndexOf('\\');
+            if (slashIndex >= 0)
+            {
+                normalized = normalized.Substring(0, slashIndex);
+            }
+
+            if (normalized == "." || normalized == "LOCALHOST" || normalized == "127.0.0.1" || normalized == "::1")
+            {
+                return true;
+            }
+
+            string machineName = Environment.MachineName.ToUpperInvariant();
+            return normalized == machineName || normalized.StartsWith(machineName + ".");
+        }
+
         public static void GetComputerShares(string computer, Utilities.Options.Arguments arguments)
         {
+            if (IsLocalComputer(computer))
+            {
+                Utilities.Status.currentCount += 1;
+                return;
+            }
+
             string[] errors = { "ERROR=53", "ERROR=5" };
             SHARE_INFO_1[] computerShares = EnumNetShares(computer);
 
@@ -389,7 +421,18 @@ namespace SharpShares.Enums
                 return;
             }
 
-            WriteToFileThreadSafe(ToCsv(report), path);
+            try
+            {
+                WriteToFileThreadSafe(ToCsv(report), path);
+            }
+            catch (Exception ex)
+            {
+                if (!_csvWriteErrorReported)
+                {
+                    Console.WriteLine("[!] CSV Write Error: {0}", ex.Message);
+                    _csvWriteErrorReported = true;
+                }
+            }
         }
 
         private static string ToCsv(ShareReport report)
@@ -441,9 +484,26 @@ namespace SharpShares.Enums
             _readWriteLock.EnterWriteLock();
             try
             {
-                using (StreamWriter sw = File.AppendText(path))
+                for (int attempt = 1; attempt <= FileWriteRetryCount; attempt++)
                 {
-                    sw.WriteLine(text);
+                    try
+                    {
+                        using (FileStream stream = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.Read))
+                        using (StreamWriter sw = new StreamWriter(stream))
+                        {
+                            sw.WriteLine(text);
+                            return;
+                        }
+                    }
+                    catch (IOException)
+                    {
+                        if (attempt == FileWriteRetryCount)
+                        {
+                            throw;
+                        }
+
+                        Thread.Sleep(FileWriteRetryDelayMilliseconds);
+                    }
                 }
             }
             finally
@@ -454,6 +514,7 @@ namespace SharpShares.Enums
 
         public static void GetAllShares(List<string> computers, Utilities.Options.Arguments arguments)
         {
+            computers = computers.Where(c => !IsLocalComputer(c)).ToList();
             Console.WriteLine("[+] Starting share enumeration against {0} hosts\n", computers.Count);
             var threadList = new List<Action>();
             foreach (string computer in computers)
